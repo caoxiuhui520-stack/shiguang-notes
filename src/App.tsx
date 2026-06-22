@@ -4,78 +4,15 @@ import {
   LoaderCircle, LogOut, Menu, Mic, Moon, MoreHorizontal, Paperclip, PenLine,
   Pin, Play, Plus, Search, Share2, Square, Sun, Trash2, Underline, Video, X,
 } from "lucide-react";
-import type { Session, User } from "@supabase/supabase-js";
 import {
   ChangeEvent, FormEvent, startTransition, useCallback, useDeferredValue,
   useEffect, useMemo, useRef, useState,
 } from "react";
-import { supabase } from "./lib/supabase";
+import { api, ApiMedia, ApiNote, ApiUser, getToken, setToken } from "./lib/api";
 
-type MediaItem = {
-  id: string;
-  kind: "image" | "audio" | "video";
-  name: string;
-  url: string;
-  storagePath: string;
-};
-
-type Note = {
-  id: string;
-  title: string;
-  preview: string;
-  content: string;
-  folder: string;
+type Note = ApiNote & {
   updated: string;
-  updatedAt: string;
-  pinned: boolean;
-  deleted: boolean;
-  media: MediaItem[];
 };
-
-type NoteRow = {
-  id: string;
-  title: string;
-  preview: string;
-  content: string;
-  folder_name: string;
-  is_pinned: boolean;
-  deleted_at: string | null;
-  updated_at: string;
-};
-
-type AttachmentRow = {
-  id: string;
-  note_id: string;
-  kind: MediaItem["kind"];
-  storage_path: string;
-  file_name: string;
-};
-
-const defaultNotes = [
-  {
-    title: "东京旅行清单",
-    preview: "四月的东京，想把行程留得松一点。",
-    content:
-      "四月的东京，大概会有一点凉。\n\n想把行程留得松一点，不赶景点，只去真正想去的地方。\n\n□ 预订镰仓一日通票\n□ 找一家能看到晴空塔的咖啡店\n□ 去代官山逛旧书店\n□ 给家人带伴手礼",
-    folder_name: "生活",
-    is_pinned: true,
-  },
-  {
-    title: "关于留白的灵感",
-    preview: "好的设计不是添加更多，而是让真正重要的东西被看见。",
-    content:
-      "好的设计不是添加更多，而是让真正重要的东西被看见。\n\n界面应该像一张安静的桌子：工具都在手边，但不会抢走注意力。",
-    folder_name: "灵感",
-    is_pinned: true,
-  },
-  {
-    title: "周五产品会议",
-    preview: "同步新版编辑器进度，确认媒体上传限制。",
-    content: "会议议题\n\n1. 新版编辑器进度\n2. 媒体上传限制\n3. 离线同步策略\n4. 下周发布节奏",
-    folder_name: "工作",
-    is_pinned: false,
-  },
-];
 
 const folders = [
   { name: "全部备忘录", icon: FolderOpen },
@@ -97,60 +34,19 @@ const relativeDate = (value: string) => {
   return date.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
 };
 
-const safeFileName = (name: string) =>
-  name.normalize("NFKD").replace(/[^\w.-]+/g, "-").replace(/-+/g, "-");
+const decorateNotes = (notes: ApiNote[]): Note[] =>
+  notes.map((note) => ({ ...note, updated: relativeDate(note.updatedAt) }));
 
-const authErrorMessage = (message: string) => {
+const friendlyError = (message: string) => {
   if (/failed to fetch|networkerror|load failed/i.test(message)) {
-    return "无法连接 Supabase。请检查代理/VPN/网络，或把 *.supabase.co 加入代理规则后重试。";
+    return "无法连接云端服务。请检查网络，或稍后重试。";
   }
-  if (/invalid login credentials/i.test(message)) {
-    return "邮箱或密码不正确。";
-  }
+  if (/invalid credentials/i.test(message)) return "邮箱或密码不正确。";
+  if (/email already exists/i.test(message)) return "这个邮箱已经注册，请直接登录。";
   return message;
 };
 
-async function hydrateNotes(rows: NoteRow[]): Promise<Note[]> {
-  if (!rows.length) return [];
-  const noteIds = rows.map((row) => row.id);
-  const { data: attachments, error } = await supabase
-    .from("memo_attachments")
-    .select("id,note_id,kind,storage_path,file_name")
-    .in("note_id", noteIds);
-  if (error) throw error;
-
-  const mediaByNote = new Map<string, MediaItem[]>();
-  await Promise.all(
-    ((attachments ?? []) as AttachmentRow[]).map(async (item) => {
-      const { data } = await supabase.storage
-        .from("memo-attachments")
-        .createSignedUrl(item.storage_path, 3600);
-      const media: MediaItem = {
-        id: item.id,
-        kind: item.kind,
-        name: item.file_name,
-        storagePath: item.storage_path,
-        url: data?.signedUrl ?? "",
-      };
-      mediaByNote.set(item.note_id, [...(mediaByNote.get(item.note_id) ?? []), media]);
-    }),
-  );
-
-  return rows.map((row) => ({
-    id: row.id,
-    title: row.title,
-    preview: row.preview,
-    content: row.content,
-    folder: row.folder_name,
-    updated: relativeDate(row.updated_at),
-    updatedAt: row.updated_at,
-    pinned: row.is_pinned,
-    deleted: Boolean(row.deleted_at),
-    media: mediaByNote.get(row.id) ?? [],
-  }));
-}
-
-function Login({ onSession }: { onSession: (session: Session) => void }) {
+function Login({ onLogin }: { onLogin: (user: ApiUser) => void }) {
   const [registering, setRegistering] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -163,21 +59,17 @@ function Login({ onSession }: { onSession: (session: Session) => void }) {
     setLoading(true);
     setMessage("");
 
-    if (registering) {
-      const { data, error } = await supabase.auth.signUp({
-        email,
-        password,
-        options: { data: { display_name: name.trim() || "拾光用户" } },
-      });
-      if (error) setMessage(authErrorMessage(error.message));
-      else if (data.session) onSession(data.session);
-      else setMessage("注册成功，请打开邮箱完成验证后登录。");
-    } else {
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) setMessage(authErrorMessage(error.message));
-      else if (data.session) onSession(data.session);
+    try {
+      const result = registering
+        ? await api.register(email, password, name.trim() || "拾光用户")
+        : await api.login(email, password);
+      setToken(result.token);
+      onLogin(result.user);
+    } catch (error) {
+      setMessage(friendlyError(error instanceof Error ? error.message : "登录失败"));
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   return (
@@ -201,7 +93,7 @@ function Login({ onSession }: { onSession: (session: Session) => void }) {
         <button className="text-button" onClick={() => { setRegistering(!registering); setMessage(""); }}>
           {registering ? "已有账户？返回登录" : "还没有账户？立即注册"}
         </button>
-        <div className="login-note"><CheckCircle2 size={15} /><span>内容通过 Supabase 安全同步</span></div>
+        <div className="login-note"><CheckCircle2 size={15} /><span>内容通过云端安全同步</span></div>
       </section>
     </main>
   );
@@ -217,7 +109,7 @@ function LoadingScreen() {
 }
 
 function App() {
-  const [session, setSession] = useState<Session | null>(null);
+  const [user, setUser] = useState<ApiUser | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [notes, setNotes] = useState<Note[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -235,18 +127,15 @@ function App() {
   const chunksRef = useRef<Blob[]>([]);
   const [recording, setRecording] = useState(false);
 
-  const user = session?.user ?? null;
-
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
+    if (!getToken()) {
       setAuthReady(true);
-    });
-    const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession);
-      setAuthReady(true);
-    });
-    return () => data.subscription.unsubscribe();
+      return;
+    }
+    api.me()
+      .then(({ user: nextUser }) => setUser(nextUser))
+      .catch(() => setToken(null))
+      .finally(() => setAuthReady(true));
   }, []);
 
   useEffect(() => {
@@ -254,34 +143,20 @@ function App() {
     localStorage.setItem("shiguang-theme", dark ? "dark" : "light");
   }, [dark]);
 
-  const loadNotes = useCallback(async (activeUser: User, quietly = false) => {
+  const loadNotes = useCallback(async (quietly = false) => {
     if (!quietly) setLoadingNotes(true);
-    const { data, error } = await supabase
-      .from("memo_notes")
-      .select("id,title,preview,content,folder_name,is_pinned,deleted_at,updated_at")
-      .eq("user_id", activeUser.id)
-      .order("updated_at", { ascending: false });
-    if (error) {
+    try {
+      const { notes: nextNotes } = await api.listNotes();
+      startTransition(() => {
+        const decorated = decorateNotes(nextNotes);
+        setNotes(decorated);
+        setSelectedId((current) => current || decorated[0]?.id || "");
+      });
+    } catch {
       setSaveState("同步失败");
+    } finally {
       setLoadingNotes(false);
-      return;
     }
-
-    let rows = (data ?? []) as NoteRow[];
-    if (!rows.length) {
-      const { data: seeded, error: seedError } = await supabase
-        .from("memo_notes")
-        .insert(defaultNotes.map((note) => ({ ...note, user_id: activeUser.id })))
-        .select("id,title,preview,content,folder_name,is_pinned,deleted_at,updated_at");
-      if (!seedError) rows = (seeded ?? []) as NoteRow[];
-    }
-
-    const hydrated = await hydrateNotes(rows);
-    startTransition(() => {
-      setNotes(hydrated);
-      setSelectedId((current) => current || hydrated[0]?.id || "");
-      setLoadingNotes(false);
-    });
   }, []);
 
   useEffect(() => {
@@ -289,16 +164,9 @@ function App() {
       setNotes([]);
       return;
     }
-    void loadNotes(user);
-    const channel = supabase
-      .channel(`memo-notes-${user.id}`)
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "memo_notes", filter: `user_id=eq.${user.id}` },
-        () => void loadNotes(user, true),
-      )
-      .subscribe();
-    return () => { void supabase.removeChannel(channel); };
+    void loadNotes();
+    const timer = window.setInterval(() => void loadNotes(true), 15_000);
+    return () => window.clearInterval(timer);
   }, [loadNotes, user]);
 
   const visibleNotes = useMemo(() => notes
@@ -317,16 +185,13 @@ function App() {
 
   const persistNote = useCallback(async (note: Note) => {
     setSaveState("正在同步...");
-    const { error } = await supabase.from("memo_notes").update({
-      title: note.title,
-      preview: note.preview,
-      content: note.content,
-      folder_name: note.folder,
-      is_pinned: note.pinned,
-      deleted_at: note.deleted ? new Date().toISOString() : null,
-      updated_at: new Date().toISOString(),
-    }).eq("id", note.id);
-    setSaveState(error ? "同步失败" : "已同步");
+    try {
+      const { note: saved } = await api.updateNote(note);
+      setNotes((items) => items.map((item) => item.id === note.id ? decorateNotes([saved])[0] : item));
+      setSaveState("已同步");
+    } catch {
+      setSaveState("同步失败");
+    }
   }, []);
 
   const updateSelected = (patch: Partial<Note>) => {
@@ -339,20 +204,16 @@ function App() {
   };
 
   const createNote = async () => {
-    if (!user) return;
     const folderName = ["工作", "灵感", "生活"].includes(folder) ? folder : "生活";
-    const { data, error } = await supabase.from("memo_notes").insert({
-      user_id: user.id,
-      title: "新备忘录",
-      preview: "开始记录...",
-      content: "",
-      folder_name: folderName,
-    }).select("id,title,preview,content,folder_name,is_pinned,deleted_at,updated_at").single();
-    if (error || !data) return setSaveState("同步失败");
-    const note = (await hydrateNotes([data as NoteRow]))[0];
-    setNotes((items) => [note, ...items]);
-    setSelectedId(note.id);
-    setMobileView("editor");
+    try {
+      const { note } = await api.createNote(folderName);
+      const decorated = decorateNotes([note])[0];
+      setNotes((items) => [decorated, ...items]);
+      setSelectedId(decorated.id);
+      setMobileView("editor");
+    } catch {
+      setSaveState("同步失败");
+    }
   };
 
   const deleteOrRestore = () => {
@@ -362,39 +223,17 @@ function App() {
   };
 
   const uploadBlob = async (file: File | Blob, fileName: string, type: string) => {
-    if (!user || !selected) return;
+    if (!selected) return;
     setUploading(true);
-    const kind: MediaItem["kind"] = type.startsWith("image/")
-      ? "image" : type.startsWith("video/") ? "video" : "audio";
-    const attachmentId = crypto.randomUUID();
-    const path = `${user.id}/${selected.id}/${attachmentId}/${safeFileName(fileName)}`;
-    const { error: uploadError } = await supabase.storage
-      .from("memo-attachments")
-      .upload(path, file, { contentType: type, upsert: false });
-    if (uploadError) {
+    try {
+      const { media } = await api.upload(selected.id, file, fileName, type);
+      setNotes((items) => items.map((note) => note.id === selected.id ? { ...note, media: [...note.media, media] } : note));
+      setSaveState("已同步");
+    } catch {
+      setSaveState("上传失败");
+    } finally {
       setUploading(false);
-      return setSaveState("上传失败");
     }
-    const { data: row, error: rowError } = await supabase.from("memo_attachments").insert({
-      id: attachmentId,
-      user_id: user.id,
-      note_id: selected.id,
-      kind,
-      storage_path: path,
-      file_name: fileName,
-      mime_type: type,
-      size_bytes: file.size,
-    }).select("id").single();
-    if (rowError || !row) {
-      await supabase.storage.from("memo-attachments").remove([path]);
-      setUploading(false);
-      return setSaveState("上传失败");
-    }
-    const { data: signed } = await supabase.storage.from("memo-attachments").createSignedUrl(path, 3600);
-    const media: MediaItem = { id: attachmentId, kind, name: fileName, storagePath: path, url: signed?.signedUrl ?? "" };
-    setNotes((items) => items.map((note) => note.id === selected.id ? { ...note, media: [...note.media, media] } : note));
-    setUploading(false);
-    setSaveState("已同步");
   };
 
   const handleUpload = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -404,16 +243,16 @@ function App() {
     event.target.value = "";
   };
 
-  const removeMedia = async (item: MediaItem) => {
+  const removeMedia = async (item: ApiMedia) => {
     if (!selected) return;
-    const [{ error: fileError }, { error: rowError }] = await Promise.all([
-      supabase.storage.from("memo-attachments").remove([item.storagePath]),
-      supabase.from("memo_attachments").delete().eq("id", item.id),
-    ]);
-    if (fileError || rowError) return setSaveState("删除失败");
-    setNotes((items) => items.map((note) =>
-      note.id === selected.id ? { ...note, media: note.media.filter((media) => media.id !== item.id) } : note,
-    ));
+    try {
+      await api.removeMedia(item.id);
+      setNotes((items) => items.map((note) =>
+        note.id === selected.id ? { ...note, media: note.media.filter((media) => media.id !== item.id) } : note,
+      ));
+    } catch {
+      setSaveState("删除失败");
+    }
   };
 
   const toggleRecording = async () => {
@@ -442,15 +281,17 @@ function App() {
     }
   };
 
-  const signOut = async () => {
-    await supabase.auth.signOut();
-    setSession(null);
+  const signOut = () => {
+    setToken(null);
+    setUser(null);
+    setNotes([]);
+    setSelectedId("");
   };
 
   if (!authReady) return <LoadingScreen />;
-  if (!session) return <Login onSession={setSession} />;
+  if (!user) return <Login onLogin={setUser} />;
 
-  const displayName = user?.user_metadata?.display_name || user?.email?.split("@")[0] || "拾光用户";
+  const displayName = user.displayName || user.email.split("@")[0] || "拾光用户";
   const initial = displayName.slice(0, 1).toUpperCase();
 
   return (
@@ -479,7 +320,7 @@ function App() {
         </nav>
         <div className="sidebar-footer">
           <button onClick={() => setDark(!dark)}>{dark ? <Sun size={17} /> : <Moon size={17} />}{dark ? "浅色模式" : "深色模式"}</button>
-          <button onClick={() => void signOut()}><LogOut size={17} /> 退出登录</button>
+          <button onClick={signOut}><LogOut size={17} /> 退出登录</button>
         </div>
       </aside>
 

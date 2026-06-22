@@ -1,0 +1,12 @@
+name = "shiguang-notes-api"
+main = "worker/src/index.ts"
+compatibility_date = "2026-06-22"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "shiguang-notes"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "shiguang-notes-files"

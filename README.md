@@ -5,7 +5,7 @@
 ## 技术栈
 
 - React + TypeScript + Vite
-- Supabase Auth、Postgres、Realtime、Storage
+- Cloudflare Workers、D1、R2
 - GitHub Actions + GitHub Pages
 
 ## 本地运行
@@ -16,10 +16,27 @@ cp .env.example .env
 npm run dev
 ```
 
-在 `.env` 中填写 Supabase 项目 URL 与 publishable key。不要在前端使用
-`service_role` 或 secret key。
+另开一个终端启动后端：
 
-## 数据库
+```bash
+npm run worker:dev
+```
 
-数据库和存储策略位于 `supabase/migrations/`。所有备忘录表均启用 RLS，
-附件存储桶为私有桶，用户只能访问自己 UUID 目录下的文件。
+本地 `.env` 默认指向 `http://127.0.0.1:8787`。线上部署后，将
+`VITE_API_BASE_URL` 设置为 Cloudflare Worker 地址。
+
+## Cloudflare 部署
+
+需要先登录 Wrangler：
+
+```bash
+npx wrangler login
+```
+
+然后创建 D1、R2，更新 `wrangler.toml` 中的 `database_id`，执行：
+
+```bash
+npm run db:apply
+npx wrangler secret put JWT_SECRET
+npm run worker:deploy
+```
