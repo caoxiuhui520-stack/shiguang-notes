@@ -100,6 +100,16 @@ const relativeDate = (value: string) => {
 const safeFileName = (name: string) =>
   name.normalize("NFKD").replace(/[^\w.-]+/g, "-").replace(/-+/g, "-");
 
+const authErrorMessage = (message: string) => {
+  if (/failed to fetch|networkerror|load failed/i.test(message)) {
+    return "无法连接 Supabase。请检查代理/VPN/网络，或把 *.supabase.co 加入代理规则后重试。";
+  }
+  if (/invalid login credentials/i.test(message)) {
+    return "邮箱或密码不正确。";
+  }
+  return message;
+};
+
 async function hydrateNotes(rows: NoteRow[]): Promise<Note[]> {
   if (!rows.length) return [];
   const noteIds = rows.map((row) => row.id);
@@ -159,12 +169,12 @@ function Login({ onSession }: { onSession: (session: Session) => void }) {
         password,
         options: { data: { display_name: name.trim() || "拾光用户" } },
       });
-      if (error) setMessage(error.message);
+      if (error) setMessage(authErrorMessage(error.message));
       else if (data.session) onSession(data.session);
       else setMessage("注册成功，请打开邮箱完成验证后登录。");
     } else {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) setMessage(error.message);
+      if (error) setMessage(authErrorMessage(error.message));
       else if (data.session) onSession(data.session);
     }
     setLoading(false);
